@@ -5,9 +5,13 @@ import User from "../models/userModel.js";
 import Notification from "../models/notification.model.js";
 
 let io;
-const onlineUsers = new Map();
-// Map: userId → socketId (for online/offline tracking)
 
+// Map: userId → socketId (for online/offline tracking)
+const onlineUsers = new Map();
+
+// Random Talk Queue
+const randomTalkQueue = []; // Users waiting for random match: [{ userId, socketId, interests }]
+const activeRandomChats = new Map(); // Map: userId → { partnerId, chatStartTime }
 
 
 export const setupSocket = (server) => {
@@ -285,34 +289,202 @@ export const setupSocket = (server) => {
         });
 
 
+
+        // ---------------------------------------
+        // RANDOM TALK - START SEARCHING
+        // ---------------------------------------
+        socket.on("findRandomTalk", async ({ userId, interests = [] }) => {
+            console.log(`🎲 User ${userId} looking for random talk`);
+
+            // Remove from queue if already there
+            const existingIndex = randomTalkQueue.findIndex(user => user.userId === userId);
+            if (existingIndex !== -1) {
+                randomTalkQueue.splice(existingIndex, 1);
+            }
+
+            // Check if there's someone waiting
+            if (randomTalkQueue.length > 0) {
+                // Match with first person in queue
+                const partner = randomTalkQueue.shift();
+
+                // Fetch both users' data
+                const [user1, user2] = await Promise.all([
+                    User.findById(userId).select("-password"),
+                    User.findById(partner.userId).select("-password")
+                ]);
+
+                if (!user1 || !user2) {
+                    console.error("❌ Failed to fetch user data for random talk");
+                    return;
+                }
+
+                // Create active chat mapping
+                activeRandomChats.set(userId, {
+                    partnerId: partner.userId,
+                    chatStartTime: new Date()
+                });
+                activeRandomChats.set(partner.userId, {
+                    partnerId: userId,
+                    chatStartTime: new Date()
+                });
+
+                // Notify both users
+                socket.emit("randomTalkMatched", {
+                    user: user2,
+                    partnerId: partner.userId
+                });
+
+                io.to(partner.socketId).emit("randomTalkMatched", {
+                    user: user1,
+                    partnerId: userId
+                });
+
+                console.log(`✅ Random match: ${userId} ↔️ ${partner.userId}`);
+            } else {
+                // Add to queue
+                randomTalkQueue.push({ userId, socketId: socket.id, interests });
+                socket.emit("randomTalkSearching");
+                console.log(`⏳ User ${userId} added to random talk queue`);
+            }
+        });
+
+
+        // ---------------------------------------
+        // RANDOM TALK - CANCEL SEARCH
+        // ---------------------------------------
+        socket.on("cancelRandomTalk", ({ userId }) => {
+            const index = randomTalkQueue.findIndex(user => user.userId === userId);
+            if (index !== -1) {
+                randomTalkQueue.splice(index, 1);
+                console.log(`❌ User ${userId} cancelled random talk search`);
+            }
+        });
+
+
+        // ---------------------------------------
+        // RANDOM TALK - SEND MESSAGE
+        // ---------------------------------------
+        socket.on("randomTalkMessage", ({ message, recipientId }) => {
+            const senderId = socket.userId;
+            const sender = socket.user;
+
+            if (!activeRandomChats.has(senderId)) {
+                console.error("❌ Sender not in active random chat");
+                return;
+            }
+
+            const chatInfo = activeRandomChats.get(senderId);
+            if (chatInfo.partnerId !== recipientId) {
+                console.error("❌ Invalid recipient for random talk message");
+                return;
+            }
+
+            // Get recipient's socket
+            const recipientSocketId = onlineUsers.get(recipientId);
+            if (recipientSocketId) {
+                io.to(recipientSocketId).emit("randomTalkMessage", {
+                    message,
+                    sender: sender,
+                    createdAt: new Date()
+                });
+                // console.log(`💬 Random talk message: ${senderId} → ${recipientId}`);
+            }
+        });
+
+
+        // ---------------------------------------
+        // RANDOM TALK - TYPING INDICATOR
+        // ---------------------------------------
+        socket.on("randomTalkTyping", ({ senderId, recipientId, isTyping }) => {
+            if (!activeRandomChats.has(senderId)) return;
+
+            const recipientSocketId = onlineUsers.get(recipientId);
+            if (recipientSocketId) {
+                io.to(recipientSocketId).emit("randomTalkTyping", {
+                    userId: senderId,
+                    isTyping
+                });
+            }
+        });
+
+        // ---------------------------------------
+        // RANDOM TALK - END CHAT
+        // ---------------------------------------
+        socket.on("endRandomTalk", async ({ userId, partnerId }) => {
+            console.log(`🛑 Random talk ended: ${userId} & ${partnerId}`);
+
+            // Remove from active chats
+            activeRandomChats.delete(userId);
+            activeRandomChats.delete(partnerId);
+
+            // Notify partner
+            const partnerSocketId = onlineUsers.get(partnerId);
+            if (partnerSocketId) {
+                io.to(partnerSocketId).emit("randomTalkEnded", {
+                    endedBy: userId,
+                    reason: "User ended the chat"
+                });
+            }
+
+            socket.emit("randomTalkEnded", {
+                endedBy: userId,
+                reason: "You ended the chat"
+            });
+        });
+
         // ---------------------------------------
         // HANDLE DISCONNECT
         // ---------------------------------------
         socket.on("disconnect", async () => {
             if (socket.userId) {
                 onlineUsers.delete(socket.userId);
-                //Update the lastSeen timestamp
-                const user = await User.findByIdAndUpdate(socket.userId, { lastSeen: new Date() },).select("-password");
 
+                // **ADD THIS: Handle random talk cleanup**
+                // Remove from random talk queue
+                const queueIndex = randomTalkQueue.findIndex(user => user.userId === socket.userId);
+                if (queueIndex !== -1) {
+                    randomTalkQueue.splice(queueIndex, 1);
+                    console.log(`🚪 Removed ${socket.userId} from random talk queue on disconnect`);
+                }
 
-                // Notify everyone those who joined the chatId room.
+                // End active random chat if exists
+                if (activeRandomChats.has(socket.userId)) {
+                    const chatInfo = activeRandomChats.get(socket.userId);
+                    const partnerId = chatInfo.partnerId;
+
+                    // Remove both from active chats
+                    activeRandomChats.delete(socket.userId);
+                    activeRandomChats.delete(partnerId);
+
+                    // Notify partner
+                    const partnerSocketId = onlineUsers.get(partnerId);
+                    if (partnerSocketId) {
+                        io.to(partnerSocketId).emit("randomTalkEnded", {
+                            endedBy: socket.userId,
+                            reason: "Partner disconnected"
+                        });
+                    }
+                    console.log(`🚪 Random talk auto-ended due to disconnect: ${socket.userId}`);
+                }
+                // **END OF ADDITION**
+
+                //Update Last seen
+                const user = await User.findByIdAndUpdate(socket.userId, { lastSeen: new Date() }).select("-password");
+
                 const chats = await Chat.find({ users: { $in: [socket.userId] } }).select("_id");
                 const chatIds = chats.map(chat => chat._id);
 
-
-                // Notify all: user is offline
+                // Notify everyone those who joined the chatId room that user went offline.
                 chatIds.forEach(chatId => {
                     socket.to(chatId.toString()).emit("userStatus", {
                         chatId: chatId,
                         userId: user._id,
                         status: "offline",
-                        lastSeen: new Date() || null            //We can also use user.lastSeen both are same here
+                        lastSeen: new Date() || null
                     });
                 });
 
                 console.log(`🔴 Offline: ${socket.userId}`);
-
-
             }
         });
 
