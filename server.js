@@ -10,7 +10,7 @@ import cors from "cors";
 import { setupSocket } from "./config/socketSetup.js";
 const app = express();
 
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 9009;
 
 dotenv.config();
 connectDB();
