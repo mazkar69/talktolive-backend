@@ -25,9 +25,9 @@ const allUsers = asyncHandler(async (req, res) => {
 
 const registerUser = asyncHandler(async (req, res) => {
 
-  const { name, email, password, pic } = req.body;
+  const { countryCode, name, email, password, pic } = req.body;
 
-  if (!name || !email || !password) {
+  if (!countryCode || !name || !email || !password) {
     res.status(400);
     throw new Error("Please Enter all the Feilds");
   }
@@ -40,6 +40,7 @@ const registerUser = asyncHandler(async (req, res) => {
   }
 
   const user = await User.create({
+    countryCode,
     name,
     email,
     password,
@@ -49,6 +50,7 @@ const registerUser = asyncHandler(async (req, res) => {
   if (user) {
     res.status(201).json({
       _id: user._id,
+      countryCode: user.countryCode,
       name: user.name,
       email: user.email,
       isAdmin: user.isAdmin,
@@ -73,6 +75,7 @@ const authUser = asyncHandler(async (req, res) => {
   if (user && (await user.matchPassword(password))) {
     res.json({
       _id: user._id,
+      countryCode: user.countryCode,
       name: user.name,
       email: user.email,
       isAdmin: user.isAdmin,

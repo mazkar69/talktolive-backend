@@ -2,7 +2,8 @@ import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 
 const userSchema = mongoose.Schema(
-  {
+  { 
+    countryCode: { type: "String", required: true },
     name: { type: "String", required: true },
     email: { type: "String", unique: true, required: true },
     password: { type: "String", required: true },
